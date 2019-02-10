@@ -1,0 +1,50 @@
+#!/bin/bash
+
+MOUNT_POINT="${1}"
+DEVICE="${2}"
+
+if [ -z "${DEVICE}" ]; then
+	cat << EOF
+
+Usage:
+	${0} mount_point device
+
+EOF
+	exit 1
+fi
+
+if [ ! -d "${MOUNT_POINT}" ]; then
+	echo "Mount point must be a directory!" >&2
+	exit 1
+fi
+
+DEVICE=$(realpath "${DEVICE}")
+
+if [ ! -f "${DEVICE}" -a ! -b "${DEVICE}" ]; then
+	echo "Device must be a block special or a file!" >&2
+	exit 1
+fi
+
+REAL_MOUNT=$(realpath "${MOUNT_POINT}")
+PARENT=$(dirname "${REAL_MOUNT}")
+
+PARENT_MOUNT=$(findmnt -n -o TARGET -T "${PARENT}")
+
+RELATIVE_PATH="${REAL_MOUNT#${PARENT_MOUNT}}"
+
+BIND_MOUNT_NAME_TPL="${PARENT_MOUNT}.bind_XXXXXX"
+
+BIND_MOUNT_NAME=$(mktemp -d "${BIND_MOUNT_NAME_TPL}")
+
+mount --rbind "${PARENT_MOUNT}" "${BIND_MOUNT_NAME}"
+
+BIND_MOUNT_SUBMOUNT="${BIND_MOUNT_NAME}${RELATIVE_PATH}"
+
+mount --make-private "${BIND_MOUNT_SUBMOUNT}"
+
+mount "${DEVICE}" "${MOUNT_POINT}" 2> /dev/null || mount --make-private "${BIND_MOUNT_NAME}"
+
+umount "${BIND_MOUNT_SUBMOUNT}"
+
+umount "${BIND_MOUNT_NAME}"
+rmdir "${BIND_MOUNT_NAME}"
