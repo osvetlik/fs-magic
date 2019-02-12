@@ -1,16 +1,62 @@
 #!/bin/bash
 
+function usage() {
+	cat << EOF
+
+Usage:
+
+${0} [-h] [-t type] [-o options] mount_point device 
+	
+-t type		Specify filesystem type to mount. This parameter is passed
+		directly to the mount command.
+
+		Default: auto
+		
+-o options	Specify mount options. This parameter is passed directly to the
+		mount command.
+		
+		Default: ""
+		
+-h		Display this help and exit.
+
+EOF
+	exit 1
+}
+
+MOUNT_OPTIONS=""
+MOUNT_TYPE="auto"
+
+while getopts "toh" opt; do
+	case "${opt}" in
+		"h")
+			usage
+			;;
+		"t")
+			if [ -z "${OPTARG}" ]; then
+				echo  "Missing argument, -t must have an argument!" >&2
+			fi
+			
+			MOUNT_TYPE="${OPTARG}"
+			
+			shift 2
+			;;
+		"o")
+			if [ -z "${OPTARG}" ]; then
+				usage
+			fi
+			
+			MOUNT_OPTIONS="${OPTARG}"
+
+			shift 2
+			;;
+	esac
+done
+
 MOUNT_POINT="${1}"
 DEVICE="${2}"
 
 if [ -z "${DEVICE}" ]; then
-	cat << EOF
-
-Usage:
-	${0} mount_point device
-
-EOF
-	exit 1
+	usage
 fi
 
 if [ ! -d "${MOUNT_POINT}" ]; then
@@ -25,26 +71,57 @@ if [ ! -f "${DEVICE}" -a ! -b "${DEVICE}" ]; then
 	exit 1
 fi
 
+# Canonize path to the mount point
 REAL_MOUNT=$(realpath "${MOUNT_POINT}")
 PARENT=$(dirname "${REAL_MOUNT}")
 
+# Find parent mount so we can bind mount it.
 PARENT_MOUNT=$(findmnt -n -o TARGET -T "${PARENT}")
 
+# Extract relative path of the mount inside the parent.
 RELATIVE_PATH="${REAL_MOUNT#${PARENT_MOUNT}}"
 
 BIND_MOUNT_NAME_TPL="${PARENT_MOUNT}.bind_XXXXXX"
 
+# Create a temporary directory to bind mount the parent mount.
 BIND_MOUNT_NAME=$(mktemp -d "${BIND_MOUNT_NAME_TPL}")
 
+# Recursively mount bind the current mount to the temporary directory.
 mount --rbind "${PARENT_MOUNT}" "${BIND_MOUNT_NAME}"
 
+# Path to the mount inside the bound mount.
 BIND_MOUNT_SUBMOUNT="${BIND_MOUNT_NAME}${RELATIVE_PATH}"
 
+# Make the bound version of our mount private so the new mount doesn't propagate to it.
 mount --make-private "${BIND_MOUNT_SUBMOUNT}"
 
-mount "${DEVICE}" "${MOUNT_POINT}" 2> /dev/null || mount --make-private "${BIND_MOUNT_NAME}"
+WAIT="yes"
 
-umount "${BIND_MOUNT_SUBMOUNT}"
+# Mount the new image/device to our mount point. If the mount fails, make the
+# bound mount private so unmounts don't propagate back to the original mount.
+mount -t "${MOUNT_TYPE}" -o "${MOUNT_OPTIONS}" "${DEVICE}" "${MOUNT_POINT}" 2> /dev/null || {
+	mount --make-private "${BIND_MOUNT_NAME}"
+	# Unmount bound submount.
+	umount "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null
+	WAIT="no"
+}
 
+# Unmount bound submount, this unmount will propagate to the original mount directory thus
+# removing the now hidden old mount. We wait until the unmount succeeds.
+while [ "${WAIT}" = "yes" ]; do
+	umount "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null && WAIT="no"
+	
+	if [ "${WAIT}" = "yes" ]; then
+		if [ -t 0 ]; then
+			echo "Device is busy, waiting..."
+		fi
+		sleep 2s
+	fi
+done
+
+# Unmount the bound mount entirely.
 umount "${BIND_MOUNT_NAME}"
+
+# Remove the now empty temporary folder.
 rmdir "${BIND_MOUNT_NAME}"
+
