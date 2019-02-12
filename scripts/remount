@@ -96,7 +96,7 @@ BIND_MOUNT_SUBMOUNT="${BIND_MOUNT_NAME}${RELATIVE_PATH}"
 # Recursively bind mount the current mount to the temporary directory.
 mount --rbind "${PARENT_MOUNT}" "${BIND_MOUNT_NAME}"
 
-# Make the bound version of our mount private so the new mount doesn't propagate to it.
+# Make all submounts of the bound mount private to stop mount/unmount propagation.
 for SUBMOUNT in $(findmnt -Rn -oTARGET -T"${BIND_MOUNT_NAME}" -J | jq -r ".filesystems[].children[].target"); do
 	mount --make-rprivate "${SUBMOUNT}"
 done
