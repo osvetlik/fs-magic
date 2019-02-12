@@ -26,11 +26,8 @@ EOF
 MOUNT_OPTIONS=""
 MOUNT_TYPE="auto"
 
-while getopts "toh" opt; do
+while getopts "t:o:h" opt; do
 	case "${opt}" in
-		"h")
-			usage
-			;;
 		"t")
 			if [ -z "${OPTARG}" ]; then
 				echo  "Missing argument, -t must have an argument!" >&2
@@ -38,7 +35,7 @@ while getopts "toh" opt; do
 			
 			MOUNT_TYPE="${OPTARG}"
 			
-			shift 2
+#			shift 2
 			;;
 		"o")
 			if [ -z "${OPTARG}" ]; then
@@ -47,10 +44,15 @@ while getopts "toh" opt; do
 			
 			MOUNT_OPTIONS="${OPTARG}"
 
-			shift 2
+#			shift 2
+			;;
+		"h")
+			usage
 			;;
 	esac
 done
+
+shift "$((OPTIND-1))"
 
 MOUNT_POINT="${1}"
 DEVICE="${2}"
@@ -64,11 +66,13 @@ if [ ! -d "${MOUNT_POINT}" ]; then
 	exit 1
 fi
 
-DEVICE=$(realpath "${DEVICE}")
+if [ ! "${DEVICE}" = "overlay" ]; then
+	DEVICE=$(realpath "${DEVICE}")
 
-if [ ! -f "${DEVICE}" -a ! -b "${DEVICE}" ]; then
-	echo "Device must be a block special or a file!" >&2
-	exit 1
+	if [ ! -f "${DEVICE}" -a ! -b "${DEVICE}" ]; then
+		echo "Device must be a block special or a file!" >&2
+		exit 1
+	fi
 fi
 
 # Canonize path to the mount point
@@ -86,30 +90,32 @@ BIND_MOUNT_NAME_TPL="${PARENT_MOUNT}.bind_XXXXXX"
 # Create a temporary directory to bind mount the parent mount.
 BIND_MOUNT_NAME=$(mktemp -d "${BIND_MOUNT_NAME_TPL}")
 
-# Recursively mount bind the current mount to the temporary directory.
-mount --rbind "${PARENT_MOUNT}" "${BIND_MOUNT_NAME}"
-
 # Path to the mount inside the bound mount.
 BIND_MOUNT_SUBMOUNT="${BIND_MOUNT_NAME}${RELATIVE_PATH}"
 
+# Recursively bind mount the current mount to the temporary directory.
+mount --rbind "${PARENT_MOUNT}" "${BIND_MOUNT_NAME}"
+
 # Make the bound version of our mount private so the new mount doesn't propagate to it.
-mount --make-private "${BIND_MOUNT_SUBMOUNT}"
+for SUBMOUNT in $(findmnt -Rn -oTARGET -T"${BIND_MOUNT_NAME}" -J | jq -r ".filesystems[].children[].target"); do
+	mount --make-rprivate "${SUBMOUNT}"
+done
 
 WAIT="yes"
 
 # Mount the new image/device to our mount point. If the mount fails, make the
 # bound mount private so unmounts don't propagate back to the original mount.
-mount -t "${MOUNT_TYPE}" -o "${MOUNT_OPTIONS}" "${DEVICE}" "${MOUNT_POINT}" 2> /dev/null || {
+mount -t "${MOUNT_TYPE}" "${DEVICE}" -o "${MOUNT_OPTIONS}" "${MOUNT_POINT}" || {
 	mount --make-private "${BIND_MOUNT_NAME}"
 	# Unmount bound submount.
-	umount "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null
+	umount -R "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null
 	WAIT="no"
 }
 
 # Unmount bound submount, this unmount will propagate to the original mount directory thus
 # removing the now hidden old mount. We wait until the unmount succeeds.
 while [ "${WAIT}" = "yes" ]; do
-	umount "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null && WAIT="no"
+	umount -R "${BIND_MOUNT_SUBMOUNT}" 2> /dev/null && WAIT="no"
 	
 	if [ "${WAIT}" = "yes" ]; then
 		if [ -t 0 ]; then
@@ -119,8 +125,11 @@ while [ "${WAIT}" = "yes" ]; do
 	fi
 done
 
+# Make private to prevent further propagation
+mount --make-private "${BIND_MOUNT_NAME}"
+
 # Unmount the bound mount entirely.
-umount "${BIND_MOUNT_NAME}"
+umount -R "${BIND_MOUNT_NAME}"
 
 # Remove the now empty temporary folder.
 rmdir "${BIND_MOUNT_NAME}"
